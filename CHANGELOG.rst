@@ -4,7 +4,118 @@ Changelog
 Current
 -------
 
+- Nothing yet
+
+0.8.2 (2015-12-01)
+------------------
+
+- Skip unknown fields in mask when applied on a model
+- Added `*` token to fields mask (all remaining fields)
+- Ensure generated endpoints does not collide
+
+0.8.1 (2015-11-27)
+------------------
+
+- Refactor Swagger UI handling:
+    - allow to register a custom view with ``@api.documentation``
+    - allow to register a custom URL with the ``doc`` parameter
+    - allow to disable documentation with ``doc=False``
+- Added fields mask support through header (see: `Fields Masks Documentation`_)
+- Expose ``flask_restful.inputs`` module on ``flask_restplus.inputs``
+- Added support for some missing fields and attributes:
+    - ``host`` root field (filed only if ``SERVER_NAME`` config is set)
+    - custom ``tags`` root field
+    - ``exclusiveMinimum`` and ``exclusiveMaximum`` number field attributes
+    - ``multipleOf`` number field attribute
+    - ``minLength`` and ``maxLength`` string field attributes
+    - ``pattern`` string field attribute
+    - ``minItems`` and ``maxItems`` list field attributes
+    - ``uniqueItems`` list field attribute
+- Allow to override the default error handler
+- Fixes
+
+
+0.8.0
+-----
+
+- Added payload validation (initial implementation based on jsonschema)
+- Added ``@api.deprecated`` to mark resources or methods as deprecated
+- Added ``@api.header`` decorator shortcut to document headers
+- Added Postman export
+- Fix compatibility with flask-restful 0.3.4
+- Allow to specify an exemple a custom fields with ``__schema_example__``
+- Added support for ``PATCH`` method in Swagger UI
+- Upgraded to Swagger UI 2.1.2
+- Handle enum as callable
+- Allow to configure ``docExpansion`` with the ``SWAGGER_UI_DOC_EXPANSION`` parameter
+
+
+0.7.2
+-----
+
+- Compatibility with flask-restful 0.3.3
+- Fix action=append handling in RequestParser
+- Upgraded to SwaggerUI 2.1.8-M1
+- Miscellaneous fixes
+
+
+0.7.1
+-----
+
+- Fix ``@api.marshal_with_list()`` keyword arguments handling.
+
+
+0.7.0
+-----
+
+- Expose models and fields schema through the ``__schema__`` attribute
+- Drop support for model as class
+- Added ``@api.errorhandler()`` to register custom error handlers
+- Added ``@api.response''`` shortcut decorator
+- Fix list nested models missing in definitions
+
+
+0.6.0
+-----
+
+- Python 2.6 support
+- Experimental polymorphism support (single inheritance only)
+    - Added ``Polymorph`` field
+    - Added ``discriminator`` attribute support on ``String`` fields
+    - Added ``api.inherit()`` method
+- Added ``ClassName`` field
+
+0.5.1
+-----
+
+- Fix for parameter with schema (do not set type=string)
+
+
+0.5.0
+-----
+
+- Allow shorter syntax to set operation id: ``@api.doc('my-operation')``
+- Added a shortcut to specify the expected input model: ``@api.expect(my_fields)``
+- Added ``title`` attribute to fields
+- Added ``@api.extend()`` to extend models
+- Ensure coherence between ``required`` and ``allow_null`` for ``NestedField``
+- Support list of primitive types and list of models as body
+- Upgraded to latest version of Swagger UI
+- Fixes
+
+
+0.4.2
+-----
+
+- Rename apidoc blueprint into restplus_doc to avoid collisions
+
+
+0.4.1
+-----
+
 - Added ``SWAGGER_VALIDATOR_URL`` config parameter
+- Added ``readonly`` field parameter
+- Upgraded to latest version of Swagger UI
 
 
 0.4.0
@@ -76,3 +187,7 @@ Current
 ---
 
 - Initial release
+
+
+
+.. _Fields Masks Documentation: http://flask-restplus.readthedocs.org/en/stable/mask.html

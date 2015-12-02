@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Swagger UI</title>
+    <title>{{ title }}</title>
     {% include 'swagger-ui-css.html' %}
     {% include 'swagger-ui-libs.html' %}
     <script type="text/javascript">
@@ -10,10 +10,8 @@
                 url: "{{ specs_url }}",
                 validatorUrl: "{{ config.SWAGGER_VALIDATOR_URL }}" || null,
                 dom_id: "swagger-ui-container",
-                supportedSubmitMethods: ['get', 'post', 'put', 'delete'],
+                supportedSubmitMethods: ['get', 'post', 'put', 'delete', 'patch'],
                 onComplete: function(swaggerApi, swaggerUi){
-                    log("Loaded SwaggerUI");
-
                     if(typeof initOAuth == "function") {
                         /*
                         initOAuth({
@@ -30,7 +28,7 @@
                 onFailure: function(data) {
                     log("Unable to Load SwaggerUI");
                 },
-                docExpansion: "none"
+                docExpansion: "{{ config.SWAGGER_UI_DOC_EXPANSION | default('none') }}"
             });
             window.swaggerUi.load();
         });

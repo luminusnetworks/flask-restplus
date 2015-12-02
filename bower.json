@@ -21,6 +21,10 @@
     "tests"
   ],
   "dependencies": {
+<<<<<<< HEAD
     "swagger-ui": "https://github.com/swagger-api/swagger-ui.git#abd67ca"
+=======
+    "swagger-ui": "~2.1.2"
+>>>>>>> b3831ccb9db0f8d3e660f2388f47c9b077d49c5b
   }
 }

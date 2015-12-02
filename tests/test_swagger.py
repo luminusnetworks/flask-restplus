@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals
 
-import json
-
 from textwrap import dedent
 
 from flask import url_for, Blueprint
@@ -22,14 +20,6 @@ class SwaggerTestCase(TestCase):
         self.app.register_blueprint(blueprint)
         return api
 
-    def get_specs(self, prefix='', app=None, status=200):
-        '''Get a Swagger specification for a RestPlus API'''
-        with self.app.test_client() as client:
-            response = client.get('{0}/swagger.json'.format(prefix))
-            self.assertEquals(response.status_code, status)
-            self.assertEquals(response.content_type, 'application/json')
-            return json.loads(response.data.decode('utf8'))
-
     def test_specs_endpoint(self):
         api = restplus.Api()
         api.init_app(self.app)
@@ -43,8 +33,7 @@ class SwaggerTestCase(TestCase):
         self.assertIn('info', data)
 
     def test_specs_endpoint_with_prefix(self):
-        api = self.build_api(prefix='/api')
-        # api = restplus.Api(self.app, prefix='/api')
+        self.build_api(prefix='/api')
 
         data = self.get_specs('/api')
         self.assertEqual(data['swagger'], '2.0')
@@ -135,6 +124,78 @@ class SwaggerTestCase(TestCase):
             'name': 'Apache 2.0',
             'url': 'http://www.apache.org/licenses/LICENSE-2.0.html',
         })
+
+    def test_specs_endpoint_no_host(self):
+        restplus.Api(self.app)
+
+        data = self.get_specs('')
+        self.assertNotIn('host', data)
+
+    def test_specs_endpoint_host(self):
+        self.app.config['SERVER_NAME'] = 'api.restplus.org'
+        restplus.Api(self.app)
+
+        data = self.get_specs('')
+        self.assertEqual(data['host'], 'api.restplus.org')
+
+    def test_specs_endpoint_tags_short(self):
+        restplus.Api(self.app, tags=['tag-1', 'tag-2', 'tag-3'])
+
+        data = self.get_specs('')
+        self.assertEqual(data['tags'], [
+            {'name': 'tag-1'},
+            {'name': 'tag-2'},
+            {'name': 'tag-3'},
+            {'name': 'default', 'description': 'Default namespace'},
+        ])
+
+    def test_specs_endpoint_tags_tuple(self):
+        restplus.Api(self.app, tags=[
+            ('tag-1', 'Tag 1'),
+            ('tag-2', 'Tag 2'),
+            ('tag-3', 'Tag 3'),
+        ])
+
+        data = self.get_specs('')
+        self.assertEqual(data['tags'], [
+            {'name': 'tag-1', 'description': 'Tag 1'},
+            {'name': 'tag-2', 'description': 'Tag 2'},
+            {'name': 'tag-3', 'description': 'Tag 3'},
+            {'name': 'default', 'description': 'Default namespace'},
+        ])
+
+    def test_specs_endpoint_tags_dict(self):
+        restplus.Api(self.app, tags=[
+            {'name': 'tag-1', 'description': 'Tag 1'},
+            {'name': 'tag-2', 'description': 'Tag 2'},
+            {'name': 'tag-3', 'description': 'Tag 3'},
+        ])
+
+        data = self.get_specs('')
+        self.assertEqual(data['tags'], [
+            {'name': 'tag-1', 'description': 'Tag 1'},
+            {'name': 'tag-2', 'description': 'Tag 2'},
+            {'name': 'tag-3', 'description': 'Tag 3'},
+            {'name': 'default', 'description': 'Default namespace'},
+        ])
+
+    def test_specs_endpoint_tags_namespaces(self):
+        api = restplus.Api(self.app, tags=['ns', 'tag'])
+        ns = api.namespace('ns', 'Description')
+
+        data = self.get_specs('')
+        self.assertEqual(data['tags'], [
+            {'name': 'ns', 'description': 'Description'},
+            {'name': 'tag'},
+            {'name': 'default', 'description': 'Default namespace'},
+        ])
+
+    def test_specs_endpoint_invalid_tags(self):
+        restplus.Api(self.app, tags=[
+            {'description': 'Tag 1'}
+        ])
+
+        self.get_specs('', status=500)
 
     def test_specs_authorizations(self):
         authorizations = {
@@ -780,6 +841,57 @@ class SwaggerTestCase(TestCase):
         self.assertEqual(parameter['required'], True)
         self.assertEqual(parameter['description'], 'An age')
 
+    def test_explicit_parameters_native_types(self):
+        api = self.build_api()
+
+        @api.route('/types/', endpoint='native')
+        class NativeTypesResource(restplus.Resource):
+            @api.doc(params={
+                'int': {
+                    'type': int,
+                    'in': 'query',
+                },
+                'bool': {
+                    'type': bool,
+                    'in': 'query',
+                },
+                'str': {
+                    'type': str,
+                    'in': 'query',
+                },
+                'int-array': {
+                    'type': [int],
+                    'in': 'query',
+                },
+                'bool-array': {
+                    'type': [bool],
+                    'in': 'query',
+                },
+                'str-array': {
+                    'type': [str],
+                    'in': 'query',
+                }
+            })
+            def get(self, age):
+                return {}
+
+        data = self.get_specs()
+
+        op = data['paths']['/types/']['get']
+
+        parameters = dict((p['name'], p) for p in op['parameters'])
+
+        self.assertEqual(parameters['int']['type'], 'integer')
+        self.assertEqual(parameters['str']['type'], 'string')
+        self.assertEqual(parameters['bool']['type'], 'boolean')
+
+        self.assertEqual(parameters['int-array']['type'], 'array')
+        self.assertEqual(parameters['int-array']['items']['type'], 'integer')
+        self.assertEqual(parameters['str-array']['type'], 'array')
+        self.assertEqual(parameters['str-array']['items']['type'], 'string')
+        self.assertEqual(parameters['bool-array']['type'], 'array')
+        self.assertEqual(parameters['bool-array']['items']['type'], 'boolean')
+
     def test_response_on_method(self):
         api = self.build_api()
 
@@ -803,9 +915,6 @@ class SwaggerTestCase(TestCase):
         op = paths['/test/']['get']
         self.assertEqual(op['tags'], ['default'])
         self.assertEqual(op['responses'], {
-            # '200': {
-            #     'description': 'Success',
-            # },
             '404': {
                 'description': 'Not found',
             },
@@ -819,6 +928,152 @@ class SwaggerTestCase(TestCase):
 
         self.assertIn('definitions', data)
         self.assertIn('ErrorModel', data['definitions'])
+
+    def test_api_response(self):
+        api = self.build_api()
+
+        @api.route('/test/')
+        class TestResource(restplus.Resource):
+
+            @api.response(200, 'Success')
+            def get(self):
+                pass
+
+        data = self.get_specs('')
+        paths = data['paths']
+
+        op = paths['/test/']['get']
+        self.assertEqual(op['responses'], {
+            '200': {
+                'description': 'Success',
+            }
+        })
+
+    def test_api_response_multiple(self):
+        api = self.build_api()
+
+        @api.route('/test/')
+        class TestResource(restplus.Resource):
+
+            @api.response(200, 'Success')
+            @api.response(400, 'Validation error')
+            def get(self):
+                pass
+
+        data = self.get_specs('')
+        paths = data['paths']
+
+        op = paths['/test/']['get']
+        self.assertEqual(op['responses'], {
+            '200': {
+                'description': 'Success',
+            },
+            '400': {
+                'description': 'Validation error',
+            }
+        })
+
+    def test_api_response_with_model(self):
+        api = self.build_api()
+
+        model = api.model('SomeModel', {
+            'message': restplus.fields.String,
+        })
+
+        @api.route('/test/')
+        class TestResource(restplus.Resource):
+
+            @api.response(200, 'Success', model)
+            def get(self):
+                pass
+
+        data = self.get_specs('')
+        paths = data['paths']
+
+        op = paths['/test/']['get']
+        self.assertEqual(op['responses'], {
+            '200': {
+                'description': 'Success',
+                'schema': {
+                    '$ref': '#/definitions/SomeModel',
+                }
+            }
+        })
+
+        self.assertIn('SomeModel', data['definitions'])
+
+    def test_api_response_default(self):
+        api = self.build_api()
+
+        @api.route('/test/')
+        class TestResource(restplus.Resource):
+
+            @api.response('default', 'Error')
+            def get(self):
+                pass
+
+        data = self.get_specs('')
+        paths = data['paths']
+
+        op = paths['/test/']['get']
+        self.assertEqual(op['responses'], {
+            'default': {
+                'description': 'Error',
+            }
+        })
+
+    def test_api_header(self):
+        api = self.build_api()
+
+        @api.route('/test/')
+        class TestResource(restplus.Resource):
+
+            @api.header('X-HEADER', 'A required header', required=True)
+            def get(self):
+                pass
+
+            @api.header('X-HEADER-2', 'Another header', type=[int], collectionFormat='csv')
+            def post(self):
+                pass
+
+            @api.header('X-HEADER-3', type=int)
+            def put(self):
+                pass
+
+            @api.header('X-HEADER-4', type='boolean')
+            def delete(self):
+                pass
+
+        data = self.get_specs('')
+        paths = data['paths']
+
+        def param_for(method):
+            return paths['/test/'][method]['parameters'][0]
+
+        parameter = param_for('get')
+        self.assertEqual(parameter['name'], 'X-HEADER')
+        self.assertEqual(parameter['type'], 'string')
+        self.assertEqual(parameter['in'], 'header')
+        self.assertEqual(parameter['required'], True)
+        self.assertEqual(parameter['description'], 'A required header')
+
+        parameter = param_for('post')
+        self.assertEqual(parameter['name'], 'X-HEADER-2')
+        self.assertEqual(parameter['type'], 'array')
+        self.assertEqual(parameter['in'], 'header')
+        self.assertEqual(parameter['items']['type'], 'integer')
+        self.assertEqual(parameter['description'], 'Another header')
+        self.assertEqual(parameter['collectionFormat'], 'csv')
+
+        parameter = param_for('put')
+        self.assertEqual(parameter['name'], 'X-HEADER-3')
+        self.assertEqual(parameter['type'], 'integer')
+        self.assertEqual(parameter['in'], 'header')
+
+        parameter = param_for('delete')
+        self.assertEqual(parameter['name'], 'X-HEADER-4')
+        self.assertEqual(parameter['type'], 'boolean')
+        self.assertEqual(parameter['in'], 'header')
 
     def test_description(self):
         api = self.build_api()
@@ -892,6 +1147,20 @@ class SwaggerTestCase(TestCase):
         self.assertEqual(path['get']['operationId'], 'get_objects')
         self.assertEqual(path['post']['operationId'], 'post_test_resource')
 
+    def test_operation_id_shortcut(self):
+        api = self.build_api()
+
+        @api.route('/test/', endpoint='test')
+        class TestResource(restplus.Resource):
+            @api.doc('get_objects')
+            def get(self):
+                return {}
+
+        data = self.get_specs()
+        path = data['paths']['/test/']
+
+        self.assertEqual(path['get']['operationId'], 'get_objects')
+
     def test_custom_default_operation_id(self):
         def default_id(resource, method):
             return '{0}{1}'.format(method, resource)
@@ -957,21 +1226,6 @@ class SwaggerTestCase(TestCase):
 
         self.assertIn('definitions', data)
         self.assertIn('Person', data['definitions'])
-        self.assertEqual(data['definitions']['Person'], {
-            # 'id': 'Person',
-            'properties': {
-                'name': {
-                    'type': 'string'
-                },
-                'age': {
-                    'type': 'integer'
-                },
-                'birthdate': {
-                    'type': 'string',
-                    'format': 'date-time'
-                }
-            }
-        })
 
         path = data['paths']['/model-as-dict/']
         self.assertEqual(path['get']['responses']['200']['schema']['$ref'], '#/definitions/Person')
@@ -1005,24 +1259,6 @@ class SwaggerTestCase(TestCase):
 
         self.assertIn('definitions', data)
         self.assertIn('Person', data['definitions'])
-        self.assertEqual(data['definitions']['Person'], {
-            'required': ['address'],
-            'properties': {
-                'name': {
-                    'type': 'string'
-                },
-                'age': {
-                    'type': 'integer'
-                },
-                'birthdate': {
-                    'type': 'string',
-                    'format': 'date-time'
-                },
-                'address': {
-                    '$ref': '#/definitions/Address',
-                }
-            }
-        })
 
         self.assertIn('Address', data['definitions'].keys())
         self.assertEqual(data['definitions']['Address'], {
@@ -1056,23 +1292,16 @@ class SwaggerTestCase(TestCase):
 
         self.assertIn('definitions', data)
         self.assertIn('Person', data['definitions'])
-        self.assertEqual(data['definitions']['Person'], {
-            'properties': {
-                'name': {
-                    'type': 'string'
-                },
-                'age': {
-                    'type': 'integer'
-                },
-                'birthdate': {
-                    'type': 'string',
-                    'format': 'date-time'
+
+        responses = data['paths']['/model-as-dict/']['get']['responses']
+        self.assertEqual(responses, {
+            '200': {
+                'description': 'Success',
+                'schema': {
+                    '$ref': '#/definitions/Person'
                 }
             }
         })
-
-        path = data['paths']['/model-as-dict/']
-        self.assertEqual(path['get']['responses']['200']['schema']['$ref'], '#/definitions/Person')
 
     def test_marchal_decorator_with_code(self):
         api = self.build_api()
@@ -1094,9 +1323,45 @@ class SwaggerTestCase(TestCase):
         self.assertIn('definitions', data)
         self.assertIn('Person', data['definitions'])
 
-        path = data['paths']['/model-as-dict/']
-        self.assertEqual(list(path['delete']['responses'].keys()), ['204'])
-        self.assertEqual(path['delete']['responses']['204']['schema']['$ref'], '#/definitions/Person')
+        responses = data['paths']['/model-as-dict/']['delete']['responses']
+        self.assertEqual(responses, {
+            '204': {
+                'description': 'Success',
+                'schema': {
+                    '$ref': '#/definitions/Person'
+                }
+            }
+        })
+
+    def test_marchal_decorator_with_description(self):
+        api = self.build_api()
+
+        person = api.model('Person', {
+            'name': restplus.fields.String,
+            'age': restplus.fields.Integer,
+            'birthdate': restplus.fields.DateTime,
+        })
+
+        @api.route('/model-as-dict/')
+        class ModelAsDict(restplus.Resource):
+            @api.marshal_with(person, description='Some details')
+            def get(self):
+                return {}
+
+        data = self.get_specs()
+
+        self.assertIn('definitions', data)
+        self.assertIn('Person', data['definitions'])
+
+        responses = data['paths']['/model-as-dict/']['get']['responses']
+        self.assertEqual(responses, {
+            '200': {
+                'description': 'Some details',
+                'schema': {
+                    '$ref': '#/definitions/Person'
+                }
+            }
+        })
 
     def test_model_as_flat_dict_with_marchal_decorator_list(self):
         api = self.build_api()
@@ -1157,25 +1422,42 @@ class SwaggerTestCase(TestCase):
 
         self.assertIn('definitions', data)
         self.assertIn('Person', data['definitions'])
-        self.assertEqual(data['definitions']['Person'], {
-            'properties': {
-                'name': {
-                    'type': 'string'
-                },
-                'age': {
-                    'type': 'integer'
-                },
-                'birthdate': {
-                    'type': 'string',
-                    'format': 'date-time'
-                }
-            }
-        })
 
         path = data['paths']['/model-as-dict/']
         self.assertEqual(path['get']['responses']['200']['schema'], {
             'type': 'array',
             'items': {'$ref': '#/definitions/Person'},
+        })
+
+    def test_model_as_flat_dict_with_marchal_decorator_list_kwargs(self):
+        api = self.build_api()
+
+        fields = api.model('Person', {
+            'name': restplus.fields.String,
+            'age': restplus.fields.Integer,
+            'birthdate': restplus.fields.DateTime,
+        })
+
+        @api.route('/model-as-dict/')
+        class ModelAsDict(restplus.Resource):
+            @api.marshal_list_with(fields, code=201, description='Some details')
+            def get(self):
+                return {}
+
+        data = self.get_specs()
+
+        self.assertIn('definitions', data)
+        self.assertIn('Person', data['definitions'])
+
+        path = data['paths']['/model-as-dict/']
+        self.assertEqual(path['get']['responses'], {
+            '201': {
+                'description': 'Some details',
+                'schema': {
+                    'type': 'array',
+                    'items': {'$ref': '#/definitions/Person'},
+                }
+            }
         })
 
     def test_model_as_dict_with_list(self):
@@ -1216,6 +1498,32 @@ class SwaggerTestCase(TestCase):
 
         path = data['paths']['/model-with-list/']
         self.assertEqual(path['get']['responses']['200']['schema'], {'$ref': '#/definitions/Person'})
+
+    def test_model_as_nested_dict_with_list(self):
+        api = self.build_api()
+
+        address = api.model('Address', {
+            'road': restplus.fields.String,
+        })
+
+        person = api.model('Person', {
+            'name': restplus.fields.String,
+            'age': restplus.fields.Integer,
+            'birthdate': restplus.fields.DateTime,
+            'addresses': restplus.fields.List(restplus.fields.Nested(address))
+        })
+
+        @api.route('/model-with-list/')
+        class ModelAsDict(restplus.Resource):
+            @api.doc(model=person)
+            def get(self):
+                return {}
+
+        data = self.get_specs()
+
+        self.assertIn('definitions', data)
+        self.assertIn('Person', data['definitions'])
+        self.assertIn('Address', data['definitions'])
 
     def test_model_list_of_primitive_types(self):
         api = self.build_api()
@@ -1327,6 +1635,60 @@ class SwaggerTestCase(TestCase):
         self.assertEqual(path['get']['responses']['200']['schema'], {'$ref': '#/definitions/Person'})
         self.assertNotIn('schema', path['post']['responses']['200'])
 
+    def test_model_with_discriminator(self):
+        api = self.build_api()
+
+        fields = api.model('Person', {
+            'name': restplus.fields.String(discriminator=True),
+            'age': restplus.fields.Integer,
+        })
+
+        @api.route('/model-with-discriminator/')
+        class ModelAsDict(restplus.Resource):
+            @api.marshal_with(fields)
+            def get(self):
+                return {}
+
+        data = self.get_specs()
+
+        self.assertIn('definitions', data)
+        self.assertIn('Person', data['definitions'])
+        self.assertEqual(data['definitions']['Person'], {
+            'properties': {
+                'name': {'type': 'string'},
+                'age': {'type': 'integer'},
+            },
+            'discriminator': 'name',
+            'required': ['name']
+        })
+
+    def test_model_with_discriminator_override_require(self):
+        api = self.build_api()
+
+        fields = api.model('Person', {
+            'name': restplus.fields.String(discriminator=True, required=False),
+            'age': restplus.fields.Integer,
+        })
+
+        @api.route('/model-with-discriminator/')
+        class ModelAsDict(restplus.Resource):
+            @api.marshal_with(fields)
+            def get(self):
+                return {}
+
+        data = self.get_specs()
+
+        self.assertIn('definitions', data)
+        self.assertIn('Person', data['definitions'])
+        self.assertEqual(data['definitions']['Person'], {
+            'properties': {
+                'name': {'type': 'string'},
+                'age': {'type': 'integer'},
+            },
+            'discriminator': 'name',
+            'required': ['name']
+        })
+
     def test_model_not_found(self):
         api = self.build_api()
 
@@ -1336,188 +1698,270 @@ class SwaggerTestCase(TestCase):
             def get(self):
                 return {}
 
-        data = self.get_specs(status=500)
+        self.get_specs(status=500)
 
-        self.assertEqual(data['status'], 500)
-
-    def test_model_as_class(self):
+    def test_extend(self):
         api = self.build_api()
 
-        @api.model(fields={'name': restplus.fields.String})
-        class MyModel(restplus.fields.Raw):
-            pass
-
-        fields = api.model('Fake', {
+        parent = api.model('Person', {
             'name': restplus.fields.String,
-            'model': MyModel,
+            'age': restplus.fields.Integer,
+            'birthdate': restplus.fields.DateTime,
         })
 
-        @api.route('/model-as-class/')
+        child = api.extend('Child', parent, {
+            'extra': restplus.fields.String,
+        })
+
+        @api.route('/extend/')
         class ModelAsDict(restplus.Resource):
-            @api.doc(model=fields)
+            @api.doc(model=child)
             def get(self):
                 return {}
 
-        data = self.get_specs()
-
-        self.assertIn('definitions', data)
-        self.assertIn('Fake', data['definitions'])
-        self.assertIn('MyModel', data['definitions'])
-        self.assertEqual(data['definitions']['Fake'], {
-            'properties': {
-                'name': {
-                    'type': 'string'
-                },
-                'model': {
-                    '$ref': '#/definitions/MyModel',
-                }
-            }
-        })
-        self.assertEqual(data['definitions']['MyModel'], {
-            'properties': {
-                'name': {
-                    'type': 'string'
-                }
-            }
-        })
-
-        path = data['paths']['/model-as-class/']
-        self.assertEqual(path['get']['responses']['200']['schema'], {'$ref': '#/definitions/Fake'})
-
-    def test_nested_model_as_class(self):
-        api = self.build_api()
-
-        @api.model(fields={'name': restplus.fields.String})
-        class MyModel(restplus.fields.Raw):
-            pass
-
-        fields = api.model('Fake', {
-            'name': restplus.fields.String,
-            'nested': restplus.fields.Nested(MyModel),
-        })
-
-        @api.route('/model-as-class/')
-        class ModelAsDict(restplus.Resource):
-            @api.doc(model=fields)
-            def get(self):
-                return {}
-
-            @api.doc(model='Fake')
+            @api.doc(model='Child')
             def post(self):
                 return {}
 
         data = self.get_specs()
 
         self.assertIn('definitions', data)
-        self.assertIn('Fake', data['definitions'])
-        self.assertIn('MyModel', data['definitions'])
-        self.assertEqual(data['definitions']['Fake'], {
-            'required': ['nested'],
-            'properties': {
-                'name': {
-                    'type': 'string'
-                },
-                'nested': {
-                    '$ref': '#/definitions/MyModel',
-                }
-            }
-        })
-        self.assertEqual(data['definitions']['MyModel'], {
-            'properties': {
-                'name': {
-                    'type': 'string'
-                }
-            }
-        })
+        self.assertNotIn('Person', data['definitions'])
+        self.assertIn('Child', data['definitions'])
 
-        path = data['paths']['/model-as-class/']
-        self.assertEqual(path['get']['responses']['200']['schema'], {'$ref': '#/definitions/Fake'})
-        self.assertEqual(path['post']['responses']['200']['schema'], {'$ref': '#/definitions/Fake'})
+        path = data['paths']['/extend/']
+        self.assertEqual(path['get']['responses']['200']['schema']['$ref'], '#/definitions/Child')
+        self.assertEqual(path['post']['responses']['200']['schema']['$ref'], '#/definitions/Child')
 
-    def test_model_list_as_class(self):
+    def test_inherit(self):
         api = self.build_api()
 
-        @api.model(fields={'name': restplus.fields.String})
-        class MyModel(restplus.fields.Raw):
-            pass
-
-        fields = api.model('Fake', {
+        parent = api.model('Person', {
             'name': restplus.fields.String,
-            'list': restplus.fields.List(MyModel),
+            'age': restplus.fields.Integer,
         })
 
-        @api.route('/model-list-as-class/')
-        class ModelListAsClass(restplus.Resource):
-            @api.doc(model=fields)
+        child = api.inherit('Child', parent, {
+            'extra': restplus.fields.String,
+        })
+
+        @api.route('/inherit/')
+        class ModelAsDict(restplus.Resource):
+            @api.marshal_with(child)
+            def get(self):
+                return {
+                    'name': 'John',
+                    'age': 42,
+                    'extra': 'test',
+                }
+
+            @api.doc(model='Child')
+            def post(self):
+                return {}
+
+        data = self.get_specs()
+
+        self.assertIn('definitions', data)
+        self.assertIn('Person', data['definitions'])
+        self.assertIn('Child', data['definitions'])
+        self.assertEqual(data['definitions']['Person'], {
+            'properties': {
+                'name': {'type': 'string'},
+                'age': {'type': 'integer'},
+            }
+        })
+        self.assertEqual(data['definitions']['Child'], {
+            'allOf': [{
+                '$ref': '#/definitions/Person'
+            }, {
+                'properties': {
+                    'extra': {'type': 'string'}
+                }
+            }]
+        })
+
+        path = data['paths']['/inherit/']
+        self.assertEqual(path['get']['responses']['200']['schema']['$ref'], '#/definitions/Child')
+        self.assertEqual(path['post']['responses']['200']['schema']['$ref'], '#/definitions/Child')
+
+        data = self.get_json('/inherit/')
+        self.assertEqual(data, {
+            'name': 'John',
+            'age': 42,
+            'extra': 'test',
+        })
+
+    def test_inherit_inline(self):
+        api = self.build_api()
+
+        parent = api.model('Person', {
+            'name': restplus.fields.String,
+            'age': restplus.fields.Integer,
+        })
+
+        child = api.inherit('Child', parent, {
+            'extra': restplus.fields.String,
+        })
+
+        output = api.model('Output', {
+            'child': restplus.fields.Nested(child),
+            'children': restplus.fields.List(restplus.fields.Nested(child))
+        })
+
+        @api.route('/inherit/')
+        class ModelAsDict(restplus.Resource):
+            @api.marshal_with(output)
+            def get(self):
+                return {
+                    'child': {
+                        'name': 'John',
+                        'age': 42,
+                        'extra': 'test',
+                    },
+                    'children': [{
+                        'name': 'John',
+                        'age': 42,
+                        'extra': 'test',
+                    }, {
+                        'name': 'Doe',
+                        'age': 33,
+                        'extra': 'test2',
+                    }]
+                }
+
+        data = self.get_specs()
+
+        self.assertIn('definitions', data)
+        self.assertIn('Person', data['definitions'])
+        self.assertIn('Child', data['definitions'])
+
+        data = self.get_json('/inherit/')
+        self.assertEqual(data, {
+            'child': {
+                'name': 'John',
+                'age': 42,
+                'extra': 'test',
+            },
+            'children': [{
+                'name': 'John',
+                'age': 42,
+                'extra': 'test',
+            }, {
+                'name': 'Doe',
+                'age': 33,
+                'extra': 'test2',
+            }]
+        })
+
+    def test_polymorph_inherit(self):
+        api = self.build_api()
+
+        class Child1:
+            pass
+
+        class Child2:
+            pass
+
+        parent = api.model('Person', {
+            'name': restplus.fields.String,
+            'age': restplus.fields.Integer,
+        })
+
+        child1 = api.inherit('Child1', parent, {
+            'extra1': restplus.fields.String,
+        })
+
+        child2 = api.inherit('Child2', parent, {
+            'extra2': restplus.fields.String,
+        })
+
+        mapping = {
+            Child1: child1,
+            Child2: child2,
+        }
+
+        output = api.model('Output', {
+            'child': restplus.fields.Polymorph(mapping)
+        })
+
+        @api.route('/polymorph/')
+        class ModelAsDict(restplus.Resource):
+            @api.marshal_with(output)
             def get(self):
                 return {}
 
         data = self.get_specs()
 
         self.assertIn('definitions', data)
-        self.assertIn('Fake', data['definitions'])
-        self.assertIn('MyModel', data['definitions'])
-        self.assertEqual(data['definitions']['Fake'], {
-            'properties': {
-                'name': {
-                    'type': 'string'
-                },
-                'list': {
-                    'type': 'array',
-                    'items': {
-                        '$ref': '#/definitions/MyModel',
-                    }
-                }
-            }
-        })
-        self.assertEqual(data['definitions']['MyModel'], {
-            'properties': {
-                'name': {
-                    'type': 'string'
-                }
-            }
-        })
+        self.assertIn('Person', data['definitions'])
+        self.assertIn('Child1', data['definitions'])
+        self.assertIn('Child2', data['definitions'])
+        self.assertIn('Output', data['definitions'])
 
-        path = data['paths']['/model-list-as-class/']
-        self.assertEqual(path['get']['responses']['200']['schema'], {'$ref': '#/definitions/Fake'})
+        path = data['paths']['/polymorph/']
+        self.assertEqual(path['get']['responses']['200']['schema']['$ref'], '#/definitions/Output')
 
-    def test_custom_field(self):
+    def test_polymorph_inherit_list(self):
         api = self.build_api()
 
-        @api.model(type='integer', format='int64')
-        class MyModel(restplus.fields.Raw):
-            pass
+        class Child1:
+            name = 'Child1'
+            extra1 = 'extra1'
 
-        fields = api.model('Fake', {
+        class Child2:
+            name = 'Child2'
+            extra2 = 'extra2'
+
+        parent = api.model('Person', {
             'name': restplus.fields.String,
-            'model': MyModel,
         })
 
-        @api.route('/custom-field/')
-        class CustomFieldResource(restplus.Resource):
-            @api.doc(model=fields)
+        child1 = api.inherit('Child1', parent, {
+            'extra1': restplus.fields.String,
+        })
+
+        child2 = api.inherit('Child2', parent, {
+            'extra2': restplus.fields.String,
+        })
+
+        mapping = {
+            Child1: child1,
+            Child2: child2,
+        }
+
+        output = api.model('Output', {
+            'children': restplus.fields.List(restplus.fields.Polymorph(mapping))
+        })
+
+        @api.route('/polymorph/')
+        class ModelAsDict(restplus.Resource):
+            @api.marshal_with(output)
             def get(self):
-                return {}
+                return {
+                    'children': [Child1(), Child2()]
+                }
 
         data = self.get_specs()
 
         self.assertIn('definitions', data)
-        self.assertIn('Fake', data['definitions'])
-        self.assertNotIn('MyModel', data['definitions'])
-        self.assertEqual(data['definitions']['Fake'], {
-            'properties': {
-                'name': {
-                    'type': 'string'
-                },
-                'model': {
-                    'type': 'integer',
-                    'format': 'int64',
-                }
-            }
-        })
+        self.assertIn('Person', data['definitions'])
+        self.assertIn('Child1', data['definitions'])
+        self.assertIn('Child2', data['definitions'])
+        self.assertIn('Output', data['definitions'])
 
-        path = data['paths']['/custom-field/']
-        self.assertEqual(path['get']['responses']['200']['schema'], {'$ref': '#/definitions/Fake'})
+        path = data['paths']['/polymorph/']
+        self.assertEqual(path['get']['responses']['200']['schema']['$ref'], '#/definitions/Output')
+
+        data = self.get_json('/polymorph/')
+        self.assertEqual(data, {
+            'children': [{
+                'name': 'Child1',
+                'extra1': 'extra1',
+            }, {
+                'name': 'Child2',
+                'extra2': 'extra2',
+            }]
+        })
 
     def test_body_model(self):
         api = self.build_api()
@@ -1539,7 +1983,6 @@ class SwaggerTestCase(TestCase):
         self.assertIn('definitions', data)
         self.assertIn('Person', data['definitions'])
         self.assertEqual(data['definitions']['Person'], {
-            # 'id': 'Person',
             'properties': {
                 'name': {
                     'type': 'string'
@@ -1560,11 +2003,136 @@ class SwaggerTestCase(TestCase):
         self.assertEqual(len(op['parameters']), 1)
 
         parameter = op['parameters'][0]
-        self.assertEqual(parameter['name'], 'payload')
-        self.assertEqual(parameter['in'], 'body')
-        self.assertEqual(parameter['required'], True)
-        self.assertEqual(parameter['schema']['$ref'], '#/definitions/Person')
+        self.assertEqual(parameter, {
+            'name': 'payload',
+            'in': 'body',
+            'required': True,
+            'schema': {
+                '$ref': '#/definitions/Person'
+            }
+        })
         self.assertNotIn('description', parameter)
+
+    def test_body_model_shortcut(self):
+        api = self.build_api()
+
+        fields = api.model('Person', {
+            'name': restplus.fields.String,
+            'age': restplus.fields.Integer,
+            'birthdate': restplus.fields.DateTime,
+        })
+
+        @api.route('/model-as-dict/')
+        class ModelAsDict(restplus.Resource):
+            @api.doc(model='Person')
+            @api.expect(fields)
+            def post(self):
+                return {}
+
+        data = self.get_specs()
+
+        self.assertIn('definitions', data)
+        self.assertIn('Person', data['definitions'])
+        self.assertEqual(data['definitions']['Person'], {
+            'properties': {
+                'name': {
+                    'type': 'string'
+                },
+                'age': {
+                    'type': 'integer'
+                },
+                'birthdate': {
+                    'type': 'string',
+                    'format': 'date-time'
+                }
+            }
+        })
+
+        op = data['paths']['/model-as-dict/']['post']
+        self.assertEqual(op['responses']['200']['schema']['$ref'], '#/definitions/Person')
+
+        self.assertEqual(len(op['parameters']), 1)
+
+        parameter = op['parameters'][0]
+        self.assertEqual(parameter, {
+            'name': 'payload',
+            'in': 'body',
+            'required': True,
+            'schema': {
+                '$ref': '#/definitions/Person'
+            }
+        })
+        self.assertNotIn('description', parameter)
+
+    def test_body_primitive_list(self):
+        api = self.build_api()
+
+        @api.route('/model-list/')
+        class ModelAsDict(restplus.Resource):
+            @api.doc(body=[restplus.fields.String])
+            def post(self):
+                return {}
+
+        data = self.get_specs()
+
+        op = data['paths']['/model-list/']['post']
+        parameter = op['parameters'][0]
+        self.assertEqual(parameter, {
+            'name': 'payload',
+            'in': 'body',
+            'required': True,
+            'schema': {
+                'type': 'array',
+                'items': {'type': 'string'},
+            }
+        })
+
+    def test_body_model_list(self):
+        api = self.build_api()
+
+        fields = api.model('Person', {
+            'name': restplus.fields.String,
+            'age': restplus.fields.Integer,
+            'birthdate': restplus.fields.DateTime,
+        })
+
+        @api.route('/model-list/')
+        class ModelAsDict(restplus.Resource):
+            @api.doc(body=[fields])
+            def post(self):
+                return {}
+
+        data = self.get_specs()
+
+        self.assertIn('definitions', data)
+        self.assertIn('Person', data['definitions'])
+        self.assertEqual(data['definitions']['Person'], {
+            'properties': {
+                'name': {
+                    'type': 'string'
+                },
+                'age': {
+                    'type': 'integer'
+                },
+                'birthdate': {
+                    'type': 'string',
+                    'format': 'date-time'
+                }
+            }
+        })
+
+        op = data['paths']['/model-list/']['post']
+        parameter = op['parameters'][0]
+
+        self.assertEqual(parameter, {
+            'name': 'payload',
+            'in': 'body',
+            'required': True,
+            'schema': {
+                'type': 'array',
+                'items': {'$ref': '#/definitions/Person'},
+            }
+        })
 
     def test_body_model_as_tuple(self):
         api = self.build_api()
@@ -1586,7 +2154,6 @@ class SwaggerTestCase(TestCase):
         self.assertIn('definitions', data)
         self.assertIn('Person', data['definitions'])
         self.assertEqual(data['definitions']['Person'], {
-            # 'id': 'Person',
             'properties': {
                 'name': {
                     'type': 'string'
@@ -1607,14 +2174,19 @@ class SwaggerTestCase(TestCase):
         self.assertEqual(len(op['parameters']), 1)
 
         parameter = op['parameters'][0]
-        self.assertEqual(parameter['name'], 'payload')
-        self.assertEqual(parameter['in'], 'body')
-        self.assertEqual(parameter['required'], True)
-        self.assertEqual(parameter['description'], 'Body description')
-        self.assertEqual(parameter['schema']['$ref'], '#/definitions/Person')
+
+        self.assertEqual(parameter, {
+            'name': 'payload',
+            'in': 'body',
+            'required': True,
+            'description': 'Body description',
+            'schema': {
+                '$ref': '#/definitions/Person'
+            }
+        })
 
     def test_authorizations(self):
-        api = restplus.Api(self.app, authorizations={
+        restplus.Api(self.app, authorizations={
             'apikey': {
                 'type': 'apiKey',
                 'in': 'header',
@@ -1874,6 +2446,21 @@ class SwaggerTestCase(TestCase):
         for path in '/test/', '/test2/', '/test3/':
             self.assertNotIn(path, data['paths'])
 
+    def test_hidden_resource_from_namespace(self):
+        api = self.build_api()
+        ns = api.namespace('ns')
+
+        @ns.route('/test/', endpoint='test', doc=False)
+        class TestResource(restplus.Resource):
+            def get(self):
+                '''
+                GET operation
+                '''
+                return {}
+
+        data = self.get_specs()
+        self.assertNotIn('/ns/test/', data['paths'])
+
     def test_hidden_methods(self):
         api = self.build_api()
 
@@ -1908,3 +2495,42 @@ class SwaggerTestCase(TestCase):
         self.assertIn('get', path)
         self.assertNotIn('post', path)
         self.assertNotIn('put', path)
+
+    def test_deprecated_resource(self):
+        api = self.build_api()
+
+        @api.deprecated
+        @api.route('/test/', endpoint='test')
+        class TestResource(restplus.Resource):
+            def get(self):
+                pass
+
+            def post(self):
+                pass
+
+        data = self.get_specs()
+        resource = data['paths']['/test/']
+        for operation in resource.values():
+            self.assertIn('deprecated', operation)
+            self.assertTrue(operation['deprecated'])
+
+    def test_deprecated_method(self):
+        api = self.build_api()
+
+        @api.route('/test/', endpoint='test')
+        class TestResource(restplus.Resource):
+            def get(self):
+                pass
+
+            @api.deprecated
+            def post(self):
+                pass
+
+        data = self.get_specs()
+
+        get_operation = data['paths']['/test/']['get']
+        self.assertNotIn('deprecated', get_operation)
+
+        post_operation = data['paths']['/test/']['post']
+        self.assertIn('deprecated', post_operation)
+        self.assertTrue(post_operation['deprecated'])
