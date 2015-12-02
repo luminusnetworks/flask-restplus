@@ -39,10 +39,13 @@ Documentation
     quickstart
     syntaxic_sugar
     documenting
+    mask
     swaggerui
+    export
     example
     api
     changelog
+    contributing
 
 
 
@@ -52,4 +55,3 @@ Indices and tables
 * :ref:`genindex`
 * :ref:`modindex`
 * :ref:`search`
-

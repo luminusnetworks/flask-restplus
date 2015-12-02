@@ -1,10 +1,9 @@
-from flask import Flask
+from flask import Flask, Blueprint
 from flask.ext.restplus import Api, Resource, fields
-from werkzeug.contrib.fixers import ProxyFix
 
-app = Flask(__name__)
-app.wsgi_app = ProxyFix(app.wsgi_app)
-api = Api(app, version='1.0', title='Todo API',
+api_v1 = Blueprint('api', __name__, url_prefix='/api/1')
+
+api = Api(api_v1, version='1.0', title='Todo API',
     description='A simple TODO API extracted from the original flask-restful example',
 )
 
@@ -81,4 +80,6 @@ class TodoList(Resource):
 
 
 if __name__ == '__main__':
+    app = Flask(__name__)
+    app.register_blueprint(api_v1)
     app.run(debug=True)
