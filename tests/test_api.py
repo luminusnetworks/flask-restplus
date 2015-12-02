@@ -38,96 +38,6 @@ class APITestCase(TestCase):
             self.assertEqual(url, '/api/')
             self.assertEqual(api.base_url, 'http://localhost/api/')
 
-
-    def test_abort_code_only_with_defaults(self):
-        api = restplus.Api(self.app)
-
-        @api.route('/test/', endpoint='test')
-        class TestResource(restplus.Resource):
-            def get(self):
-                api.abort(403)
-
-        with self.app.test_client() as client:
-            response = client.get('/test/')
-            self.assertEquals(response.status_code, 403)
-            self.assertEquals(response.content_type, 'application/json')
-
-            data = json.loads(response.data.decode('utf8'))
-            self.assertEqual(data['status'], 403)
-            self.assertIn('message', data)
-
-    def test_abort_with_message(self):
-        api = restplus.Api(self.app)
-
-        @api.route('/test/', endpoint='test')
-        class TestResource(restplus.Resource):
-            def get(self):
-                api.abort(403, 'A message')
-
-        with self.app.test_client() as client:
-            response = client.get('/test/')
-            self.assertEquals(response.status_code, 403)
-            self.assertEquals(response.content_type, 'application/json')
-
-            data = json.loads(response.data.decode('utf8'))
-            self.assertEqual(data['status'], 403)
-            self.assertEqual(data['message'], 'A message')
-
-    def test_abort_with_lazy_init(self):
-        api = restplus.Api()
-
-        @api.route('/test/', endpoint='test')
-        class TestResource(restplus.Resource):
-            def get(self):
-                api.abort(403)
-
-        api.init_app(self.app)
-
-        with self.app.test_client() as client:
-            response = client.get('/test/')
-            self.assertEquals(response.status_code, 403)
-            self.assertEquals(response.content_type, 'application/json')
-
-            data = json.loads(response.data.decode('utf8'))
-            self.assertEqual(data['status'], 403)
-            self.assertIn('message', data)
-
-    def test_abort_on_exception(self):
-        api = restplus.Api(self.app)
-
-        @api.route('/test/', endpoint='test')
-        class TestResource(restplus.Resource):
-            def get(self):
-                raise ValueError()
-
-        with self.app.test_client() as client:
-            response = client.get('/test/')
-            self.assertEquals(response.status_code, 500)
-            self.assertEquals(response.content_type, 'application/json')
-
-            data = json.loads(response.data.decode('utf8'))
-            self.assertEqual(data['status'], 500)
-            self.assertIn('message', data)
-
-    def test_abort_on_exception_with_lazy_init(self):
-        api = restplus.Api()
-
-        @api.route('/test/', endpoint='test')
-        class TestResource(restplus.Resource):
-            def get(self):
-                raise ValueError()
-
-        api.init_app(self.app)
-
-        with self.app.test_client() as client:
-            response = client.get('/test/')
-            self.assertEquals(response.status_code, 500)
-            self.assertEquals(response.content_type, 'application/json')
-
-            data = json.loads(response.data.decode('utf8'))
-            self.assertEqual(data['status'], 500)
-            self.assertIn('message', data)
-
     def test_parser(self):
         api = restplus.Api()
         self.assertIsInstance(api.parser(), restplus.reqparse.RequestParser)
@@ -164,3 +74,158 @@ class APITestCase(TestCase):
             },
             'other': {'description': 'another param'},
         }})
+
+    def test_specs_endpoint_not_added(self):
+        api = restplus.Api()
+        api.init_app(self.app, add_specs=False)
+        self.assertNotIn('specs', api.endpoints)
+        self.assertNotIn('specs', self.app.view_functions)
+
+    def test_specs_endpoint_not_found_if_not_added(self):
+        api = restplus.Api()
+        api.init_app(self.app, add_specs=False)
+        with self.app.test_client() as client:
+            resp = client.get('/swagger.json')
+        self.assertEqual(resp.status_code, 404)
+
+    def test_default_endpoint(self):
+        api = restplus.Api(self.app)
+
+        @api.route('/test/')
+        class TestResource(restplus.Resource):
+            pass
+
+        with self.context():
+            self.assertEqual(url_for('test_resource'), '/test/')
+
+    def test_default_endpoint_lazy(self):
+        api = restplus.Api()
+
+        @api.route('/test/')
+        class TestResource(restplus.Resource):
+            pass
+
+        api.init_app(self.app)
+
+        with self.context():
+            self.assertEqual(url_for('test_resource'), '/test/')
+
+    def test_default_endpoint_with_blueprint(self):
+        blueprint = Blueprint('api', __name__, url_prefix='/api')
+        api = restplus.Api(blueprint)
+        self.app.register_blueprint(blueprint)
+
+        @api.route('/test/')
+        class TestResource(restplus.Resource):
+            pass
+
+        with self.context():
+            self.assertEqual(url_for('api.test_resource'), '/api/test/')
+
+    def test_default_endpoint_for_namespace(self):
+        api = restplus.Api(self.app)
+        ns = api.namespace('ns', 'Test namespace')
+
+        @ns.route('/test/')
+        class TestResource(restplus.Resource):
+            pass
+
+        with self.context():
+            self.assertEqual(url_for('ns_test_resource'), '/ns/test/')
+
+    def test_default_endpoint_lazy_for_namespace(self):
+        api = restplus.Api()
+        ns = api.namespace('ns', 'Test namespace')
+
+        @ns.route('/test/')
+        class TestResource(restplus.Resource):
+            pass
+
+        api.init_app(self.app)
+
+        with self.context():
+            self.assertEqual(url_for('ns_test_resource'), '/ns/test/')
+
+    def test_default_endpoint_for_namespace_with_blueprint(self):
+        blueprint = Blueprint('api', __name__, url_prefix='/api')
+        api = restplus.Api(blueprint)
+        ns = api.namespace('ns', 'Test namespace')
+
+        @ns.route('/test/')
+        class TestResource(restplus.Resource):
+            pass
+
+        self.app.register_blueprint(blueprint)
+
+        with self.context():
+            self.assertEqual(url_for('api.ns_test_resource'), '/api/ns/test/')
+
+    def test_multiple_default_endpoint(self):
+        api = restplus.Api(self.app)
+
+        @api.route('/test2/')
+        @api.route('/test/')
+        class TestResource(restplus.Resource):
+            pass
+
+        with self.context():
+            self.assertEqual(url_for('test_resource'), '/test/')
+            self.assertEqual(url_for('test_resource_2'), '/test2/')
+
+    def test_multiple_default_endpoint_lazy(self):
+        api = restplus.Api()
+
+        @api.route('/test2/')
+        @api.route('/test/')
+        class TestResource(restplus.Resource):
+            pass
+
+        api.init_app(self.app)
+
+        with self.context():
+            self.assertEqual(url_for('test_resource'), '/test/')
+            self.assertEqual(url_for('test_resource_2'), '/test2/')
+
+    def test_multiple_default_endpoint_for_namespace(self):
+        api = restplus.Api(self.app)
+        ns = api.namespace('ns', 'Test namespace')
+
+        @ns.route('/test2/')
+        @ns.route('/test/')
+        class TestResource(restplus.Resource):
+            pass
+
+        with self.context():
+            self.assertEqual(url_for('ns_test_resource'), '/ns/test/')
+            self.assertEqual(url_for('ns_test_resource_2'), '/ns/test2/')
+
+    def test_multiple_default_endpoint_lazy_for_namespace(self):
+        api = restplus.Api()
+        ns = api.namespace('ns', 'Test namespace')
+
+        @ns.route('/test2/')
+        @ns.route('/test/')
+        class TestResource(restplus.Resource):
+            pass
+
+        api.init_app(self.app)
+
+        with self.context():
+            self.assertEqual(url_for('ns_test_resource'), '/ns/test/')
+            self.assertEqual(url_for('ns_test_resource_2'), '/ns/test2/')
+
+    def test_multiple_default_endpoint_for_namespace_with_blueprint(self):
+        blueprint = Blueprint('api', __name__, url_prefix='/api')
+        api = restplus.Api(blueprint)
+        ns = api.namespace('ns', 'Test namespace')
+
+        @ns.route('/test2/')
+        @ns.route('/test/')
+        class TestResource(restplus.Resource):
+            pass
+
+        self.app.register_blueprint(blueprint)
+
+        with self.context():
+            self.assertEqual(url_for('api.ns_test_resource'), '/api/ns/test/')
+            self.assertEqual(url_for('api.ns_test_resource_2'), '/api/ns/test2/')

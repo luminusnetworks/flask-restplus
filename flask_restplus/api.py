@@ -1,18 +1,37 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals
 
+import copy
+import difflib
+import inspect
+import re
 import six
+import sys
 
-from flask import url_for
+from flask import url_for, request, current_app
+from flask.signals import got_request_exception
+
 from flask.ext import restful
 
+from jsonschema import RefResolver
+
+from werkzeug import cached_property
+from werkzeug.datastructures import Headers
+from werkzeug.exceptions import HTTPException
+from werkzeug.http import HTTP_STATUS_CODES
+
 from . import apidoc
+from .marshalling import marshal, marshal_with
 from .model import ApiModel
+from .mask import ParseError
 from .namespace import ApiNamespace
+from .postman import PostmanCollectionV1
 from .resource import Resource
 from .swagger import Swagger
-from .utils import merge, default_id
+from .utils import merge, default_id, camel_to_dash
 from .reqparse import RequestParser
+
+RE_RULES = re.compile('(<.*>)')
 
 
 class Api(restful.Api):
@@ -31,8 +50,8 @@ class Api(restful.Api):
         - The API root/documentation will be ``{endpoint}.root``
         - A resource registered as 'resource' will be available as ``{endpoint}.resource``
 
-    :param app: the Flask application object
-    :type app: flask.Flask
+    :param app: the Flask application object or a Blueprint
+    :type app: flask.Flask|flask.Blueprint
 
     :param version: The API version (used in Swagger documentation)
     :type version: str
@@ -64,11 +83,15 @@ class Api(restful.Api):
     :param default_label: The default namespace label (used in Swagger documentation)
     :type default_label: str
 
-    :param prefix: Prefix all routes with a value, eg v1 or 2010-04-01
-    :type prefix: str
-
     :param default_mediatype: The default media type to return
     :type default_mediatype: str
+
+    :param validate: Whether or not the API should perform input payload validation.
+    :type validate: bool
+
+    :param doc: The documentation path. If set to a false value, documentation is disabled.
+                (Default to '/')
+    :type doc: str
 
     :param decorators: Decorators to attach to every resource
     :type decorators: list
@@ -93,8 +116,9 @@ class Api(restful.Api):
     def __init__(self, app=None, version='1.0', title=None, description=None,
             terms_url=None, license=None, license_url=None,
             contact=None, contact_url=None, contact_email=None,
-            authorizations=None, security=None, ui=True, default_id=default_id,
-            default='default', default_label='Default namespace', **kwargs):
+            authorizations=None, security=None, doc='/', default_id=default_id,
+            default='default', default_label='Default namespace', validate=None,
+            tags=None, **kwargs):
         self.version = version
         self.title = title or 'API'
         self.description = description
@@ -106,10 +130,19 @@ class Api(restful.Api):
         self.license_url = license_url
         self.authorizations = authorizations
         self.security = security
-        self.ui = ui
         self.default_id = default_id
+        self._validate = validate
+        self._doc = doc
+        self._doc_view = None
+        self._default_error_handler = None
+        self.tags = tags or []
 
+        self._error_handlers = {
+            ParseError: mask_error_handler
+        }
+        self._schema = None
         self.models = {}
+        self._refresolver = None
         self.namespaces = []
         self.default_namespace = ApiNamespace(self, default, default_label,
             endpoint='{0}-declaration'.format(default),
@@ -119,6 +152,35 @@ class Api(restful.Api):
         super(Api, self).__init__(app, **kwargs)
 
     def init_app(self, app, **kwargs):
+        '''
+        Allow to lazy register the API on a Flask application::
+
+        >>> app = Flask(__name__)
+        >>> api = Api()
+        >>> api.init_app(app)
+
+        :param app: the Flask application object
+        :type app: flask.Flask
+
+        :param title: The API title (used in Swagger documentation)
+        :type title: str
+
+        :param description: The API description (used in Swagger documentation)
+        :type description: str
+
+        :param terms_url: The API terms page URL (used in Swagger documentation)
+        :type terms_url: str
+
+        :param contact: A contact email for the API (used in Swagger documentation)
+        :type contact: str
+
+        :param license: The license associated to the API (used in Swagger documentation)
+        :type license: str
+
+        :param license_url: The license page URL (used in Swagger documentation)
+        :type license_url: str
+
+        '''
         self.title = kwargs.get('title', self.title)
         self.description = kwargs.get('description', self.description)
         self.terms_url = kwargs.get('terms_url', self.terms_url)
@@ -127,43 +189,94 @@ class Api(restful.Api):
         self.contact_email = kwargs.get('contact_email', self.contact_email)
         self.license = kwargs.get('license', self.license)
         self.license_url = kwargs.get('license_url', self.license_url)
-
-        self.add_resource(self.swagger_view(), '/swagger.json', endpoint='specs', doc=False)
+        self._add_specs = kwargs.get('add_specs', True)
 
         super(Api, self).init_app(app)
 
-        if self.blueprint:
-            self.blueprint.add_url_rule('/', 'root', self.render_root)
-
     def _init_app(self, app):
+        self._register_specs(self.blueprint or app)
+        self._register_doc(self.blueprint or app)
         super(Api, self)._init_app(app)
-        if not self.blueprint:
-            app.add_url_rule('/', 'root', self.render_root)
+        self._register_apidoc(app)
+        self._validate = self._validate if self._validate is not None else app.config.get('RESTPLUS_VALIDATE', False)
+        app.config.setdefault('RESTPLUS_MASK_HEADER', 'X-Fields')
+        app.config.setdefault('RESTPLUS_MASK_SWAGGER', True)
 
-    def swagger_view(self):
-        class SwaggerView(Resource):
-            api = self
+    def _register_apidoc(self, app):
+        conf = app.extensions.setdefault('restplus', {})
+        if not conf.get('apidoc_registered', False):
+            app.register_blueprint(apidoc.apidoc)
+        conf['apidoc_registered'] = True
 
-            def get(self):
-                return Swagger(self.api).as_dict()
+    def _register_specs(self, app_or_blueprint):
+        if self._add_specs:
+            self._register_view(
+                app_or_blueprint,
+                SwaggerView,
+                '/swagger.json',
+                endpoint=str('specs'),
+                resource_class_args=(self, )
+            )
 
-            def mediatypes(self):
-                return ['application/json']
-        return SwaggerView
+    def _register_doc(self, app_or_blueprint):
+        if self._add_specs and self._doc:
+            # Register documentation before root if enabled
+            app_or_blueprint.add_url_rule(self._doc, 'doc', self.render_doc)
+        app_or_blueprint.add_url_rule('/', 'root', self.render_root)
+
+    def documentation(self, func):
+        self._doc_view = func
+        return func
 
     def render_root(self):
+        self.abort(404)
+
+    def render_doc(self):
         '''Override this method to customize the documentation page'''
-        if not self.ui:
+        if self._doc_view:
+            return self._doc_view()
+        elif not self._doc:
             self.abort(404)
         return apidoc.ui_for(self)
 
+    def default_endpoint(self, resource, namespace=None):
+        '''
+        Provide a default endpoint for a resource on a given namespace.
+
+        Endpoints are ensured not to collide.
+        '''
+        endpoint = camel_to_dash(resource.__name__)
+        namespace = namespace or self.default_namespace
+        if namespace is not self.default_namespace:
+            endpoint = '{ns.name}_{endpoint}'.format(ns=namespace, endpoint=endpoint)
+        if endpoint in namespace.resources:
+            suffix = 2
+            while True:
+                new_endpoint = '{base}_{suffix}'.format(base=endpoint, suffix=suffix)
+                if new_endpoint not in namespace.resources:
+                    endpoint = new_endpoint
+                    break
+                suffix += 1
+        return endpoint
+
     def add_resource(self, resource, *urls, **kwargs):
         '''Register a Swagger API declaration for a given API Namespace'''
-        kwargs['endpoint'] = str(kwargs.pop('endpoint', None) or resource.__name__.lower())
-        if kwargs.pop('doc', True) and not kwargs.pop('namespace', None):
-            self.default_namespace.resources.append((resource, urls, kwargs))
+        namespace = kwargs.pop('namespace', None)
+        if kwargs.pop('doc', True) and not namespace:
+            return self.default_namespace.add_resource(resource, *urls, **kwargs)
+
+        endpoint = kwargs.pop('endpoint', None)
+        endpoint = str(endpoint or self.default_endpoint(resource, namespace))
+        kwargs['endpoint'] = endpoint
+
+        args = kwargs.pop('resource_class_args', [])
+        if isinstance(args, tuple):
+            args = list(args)
+        args.insert(0, self)
+        kwargs['resource_class_args'] = args
 
         super(Api, self).add_resource(resource, *urls, **kwargs)
+        return endpoint
 
     def add_namespace(self, ns):
         if ns not in self.namespaces:
@@ -213,8 +326,18 @@ class Api(restful.Api):
     def base_path(self):
         return url_for(self.endpoint('root'))
 
-    def doc(self, show=True, **kwargs):
+    @cached_property
+    def __schema__(self):
+        if not self._schema:
+            self._schema = Swagger(self).as_dict()
+        return self._schema
+
+    def doc(self, shortcut=None, **kwargs):
         '''Add some api documentation to the decorated object'''
+        if isinstance(shortcut, six.text_type):
+            kwargs['id'] = shortcut
+        show = shortcut if isinstance(shortcut, bool) else True
+
         def wrapper(documented):
             self._handle_api_doc(documented, kwargs if show else False)
             return documented
@@ -235,7 +358,7 @@ class Api(restful.Api):
         '''
         Register a model
 
-        Model can be either a dictionnary or a fields.Raw subclass.
+        Model can be either a dictionary or a fields. Raw subclass.
         '''
         if isinstance(model, dict):
             model = ApiModel(model)
@@ -251,6 +374,41 @@ class Api(restful.Api):
                 return cls
             return wrapper
 
+    def extend(self, name, parent, fields):
+        '''
+        Extend a model (Duplicate all fields)
+        '''
+        if isinstance(parent, list):
+            parents = []
+
+            for item in parent:
+                parents.append(copy.deepcopy(item))
+
+            parent = {}
+
+            for value in parents:
+                parent.update(value)
+
+        model = ApiModel(copy.deepcopy(parent))
+        model.__apidoc__['name'] = name
+        model.update(fields)
+        self.models[name] = model
+        return model
+
+    def inherit(self, name, parent, fields):
+        '''
+        Inherit a modal (use the Swagger composition pattern aka. allOf)
+        '''
+        model = ApiModel(fields)
+        model.__apidoc__['name'] = name
+        model.__parent__ = parent
+        self.models[name] = model
+        return model
+
+    def expect(self, body, validate=None):
+        '''Specify the expected input model'''
+        return self.doc(body=body, validate=validate or self._validate)
+
     def parser(self):
         '''Instanciate a RequestParser'''
         return RequestParser()
@@ -260,7 +418,7 @@ class Api(restful.Api):
         field.__apidoc__ = merge(getattr(field, '__apidoc__', {}), {'as_list': True})
         return field
 
-    def marshal_with(self, fields, as_list=False, code=200, **kwargs):
+    def marshal_with(self, fields, as_list=False, code=200, description=None, **kwargs):
         '''
         A decorator specifying the fields to use for serialization.
 
@@ -270,23 +428,172 @@ class Api(restful.Api):
         :type code: integer
         '''
         def wrapper(func):
-            doc = {'model': [fields]} if as_list else {'model': fields}
-            doc['default_code'] = code
+            doc = {
+                'responses': {
+                    code: (description, [fields]) if as_list else (description, fields)
+                },
+                '__mask__': True,  # Mask values can't be determined outside app context
+            }
             func.__apidoc__ = merge(getattr(func, '__apidoc__', {}), doc)
-            return restful.marshal_with(fields, **kwargs)(func)
+            resolved = getattr(fields, 'resolved', fields)
+            return marshal_with(resolved, **kwargs)(func)
         return wrapper
 
-    def marshal_list_with(self, fields, code=200):
+    def marshal_list_with(self, fields, **kwargs):
         '''A shortcut decorator for ``marshal_with(as_list=True, code=code)``'''
-        return self.marshal_with(fields, True)
+        return self.marshal_with(fields, True, **kwargs)
 
     def marshal(self, data, fields):
         '''A shortcut to the ``marshal`` helper'''
-        return restful.marshal(data, fields)
+        resolved = getattr(fields, 'resolved', fields)
+        return marshal(data, resolved)
+
+    def errorhandler(self, exception):
+        '''Register an error handler for a given exception'''
+        if inspect.isclass(exception) and issubclass(exception, Exception):
+            # Register an error handler for a given exception
+            def wrapper(func):
+                self._error_handlers[exception] = func
+                return func
+            return wrapper
+        else:
+            # Register the default error handler
+            self._default_error_handler = exception
+            return exception
+
+    def handle_error(self, e):
+        '''
+        Error handler for the API transforms a raised exception into a Flask response,
+        with the appropriate HTTP status code and body.
+
+        :param e: the raised Exception object
+        :type e: Exception
+
+        '''
+        got_request_exception.send(current_app._get_current_object(), exception=e)
+
+        headers = Headers()
+        if isinstance(e, HTTPException):
+            code = e.code
+            default_data = {
+                'message': getattr(e, 'description', HTTP_STATUS_CODES.get(code, ''))
+            }
+            headers = e.get_response().headers
+        elif e.__class__ in self._error_handlers:
+            handler = self._error_handlers[e.__class__]
+            result = handler(e)
+            default_data, code = result if len(result) == 2 else (result, 500)
+        elif self._default_error_handler:
+            result = self._default_error_handler(e)
+            default_data, code = result if len(result) == 2 else (result, 500)
+        else:
+            code = 500
+            default_data = {
+                'message': HTTP_STATUS_CODES.get(code, str(e)),
+            }
+
+        default_data['message'] = default_data.get('message', str(e))
+        data = getattr(e, 'data', default_data)
+        fallback_mediatype = None
+
+        if code >= 500:
+            exc_info = sys.exc_info()
+            if exc_info[1] is None:
+                exc_info = None
+            current_app.log_exception(exc_info)
+
+        elif code == 404 and current_app.config.get("ERROR_404_HELP", True):
+            data['message'] = self._help_on_404(data.get('message', None))
+
+        elif code == 405:
+            headers['Allow'] = ', '.join(e.valid_methods)
+
+        elif code == 406 and self.default_mediatype is None:
+            # if we are handling NotAcceptable (406), make sure that
+            # make_response uses a representation we support as the
+            # default mediatype (so that make_response doesn't throw
+            # another NotAcceptable error).
+            supported_mediatypes = list(self.representations.keys())
+            fallback_mediatype = supported_mediatypes[0] if supported_mediatypes else "text/plain"
+
+        resp = self.make_response(data, code, headers, fallback_mediatype=fallback_mediatype)
+
+        if code == 401:
+            resp = self.unauthorized(resp)
+        return resp
+
+    def _help_on_404(self, message=None):
+        rules = dict([(RE_RULES.sub('', rule.rule), rule.rule)
+                      for rule in current_app.url_map.iter_rules()])
+        close_matches = difflib.get_close_matches(request.path, rules.keys())
+        if close_matches:
+            # If we already have a message, add punctuation and continue it.
+            message = ''.join((
+                (message.rstrip('.') + '. ') if message else '',
+                'You have requested this URI [',
+                request.path,
+                '] but did you mean ',
+                ' or '.join((rules[match] for match in close_matches)),
+                ' ?',
+            ))
+        return message
+
+    def response(self, code, description, model=None, **kwargs):
+        '''Specify one of the expected responses'''
+        return self.doc(responses={code: (description, model) if model else description})
+
+    def header(self, name, description=None, **kwargs):
+        '''Specify one of the expected headers'''
+        param = kwargs
+        param['in'] = 'header'
+        param['description'] = description
+        return self.doc(params={name: param})
+
+    def deprecated(self, func):
+        '''Mark a resource or a method as deprecated'''
+        return self.doc(deprecated=True)(func)
+
+    def as_postman(self, urlvars=False, swagger=False):
+        return PostmanCollectionV1(self, swagger=swagger).as_dict(urlvars=urlvars)
+
+    def validate_payload(self, func):
+        '''Perform a payload validation on expected model'''
+        def wrapper(*args, **kwargs):
+            if hasattr(func, '__apidoc__'):
+                model = func.__apidoc__.get('body')
+                validate = func.__apidoc__.get('validate', False)
+                if model and validate and hasattr(model, 'validate'):
+                    # TODO: proper content negotiation
+                    data = request.get_json()
+                    model.validate(data, self.refresolver)
+            return func(*args, **kwargs)
+        return wrapper
+
+    @property
+    def payload(self):
+        return request.get_json()
+
+    @property
+    def refresolver(self):
+        if not self._refresolver:
+            self._refresolver = RefResolver.from_schema(self.__schema__)
+        return self._refresolver
+
+
+class SwaggerView(Resource):
+    def get(self):
+        return self.api.__schema__
+
+    def mediatypes(self):
+        return ['application/json']
+
+
+def mask_error_handler(error):
+    return {'message': 'Mask parse error: {0}'.format(error)}, 400
 
 
 def unshortcut_params_description(data):
     if 'params' in data:
-        for name, description in data['params'].items():
+        for name, description in six.iteritems(data['params']):
             if isinstance(description, six.string_types):
                 data['params'][name] = {'description': description}

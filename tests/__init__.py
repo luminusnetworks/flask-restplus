@@ -2,11 +2,23 @@
 from __future__ import unicode_literals
 
 import json
-import unittest
+try:
+    import unittest2 as unittest
+except ImportError:
+    import unittest
+
+try:
+    from mock import Mock
+except:
+    # python3
+    from unittest.mock import Mock
 
 from contextlib import contextmanager
 
 from flask import Flask
+
+
+skipIf = unittest.skipIf
 
 
 class TestCase(unittest.TestCase):
@@ -20,18 +32,32 @@ class TestCase(unittest.TestCase):
         with self.app.test_request_context('/'):
             yield
 
-    def get_specs(self, prefix='/api', app=None, status=200):
-        '''Get a Swagger specification for a RestPlus API'''
-        with self.app.test_client() as client:
-            response = client.get('{0}/swagger.json'.format(prefix))
-            self.assertEquals(response.status_code, status)
-            self.assertEquals(response.content_type, 'application/json')
-            return json.loads(response.data.decode('utf8'))
+    @contextmanager
+    def settings(self, **settings):
+        '''
+        A context manager to alter app settings during a test and restore it after..
+        '''
+        original = {}
 
-    def get_declaration(self, namespace='default', prefix='/api', status=200, app=None):
-        '''Get an API declaration for a given namespace'''
+        # backup
+        for key, value in settings.items():
+            original[key] = self.app.config.get(key)
+            self.app.config[key] = value
+
+        yield
+
+        # restore
+        for key, value in original.items():
+            self.app.config[key] = value
+
+    def get_json(self, url, status=200, headers=None):
         with self.app.test_client() as client:
-            response = client.get('{0}/swagger.json'.format(prefix, namespace))
-            self.assertEquals(response.status_code, status)
-            self.assertEquals(response.content_type, 'application/json')
-            return json.loads(response.data.decode('utf8'))
+            response = client.get(url, headers=headers or {})
+
+        self.assertEquals(response.status_code, status)
+        self.assertEquals(response.content_type, 'application/json')
+        return json.loads(response.data.decode('utf8'))
+
+    def get_specs(self, prefix='', status=200):
+        '''Get a Swagger specification for a RestPlus API'''
+        return self.get_json('{0}/swagger.json'.format(prefix), status=status)

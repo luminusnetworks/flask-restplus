@@ -2,18 +2,22 @@
 from __future__ import unicode_literals, absolute_import
 
 import re
-import six
 
 from inspect import isclass
 from collections import Hashable
-from six import string_types
+try:
+    from collections import OrderedDict  # noqa
+except ImportError:
+    from ordereddict import OrderedDict  # noqa
+from six import string_types, itervalues, iteritems, iterkeys
 
 from flask import current_app
 
 
 from . import fields
 from .exceptions import SpecsError
-from .utils import merge
+from .model import ApiModel
+from .utils import merge, not_none, not_none_sorted
 
 
 #: Maps Flask/Werkzeug rooting types to Swagger ones
@@ -22,19 +26,6 @@ PATH_TYPES = {
     'float': 'number',
     'string': 'string',
     None: 'string',
-}
-
-
-#: Maps Flask-Restful/plus fields types to Swagger ones
-FIELDS = {
-    fields.Raw: {'type': 'object'},
-    fields.String: {'type': 'string'},
-    fields.Integer: {'type': 'integer'},
-    fields.Boolean: {'type': 'boolean'},
-    fields.Float: {'type': 'number'},
-    fields.Arbitrary: {'type': 'number'},
-    fields.DateTime: {'type': 'string', 'format': 'date-time'},
-    fields.Fixed: {'type': 'number'},
 }
 
 
@@ -60,17 +51,14 @@ PY_TYPES = {
 RE_URL = re.compile(r'<(?:[^:<>]+:)?([^<>]+)>')
 RE_PARAMS = re.compile(r'<((?:[^:<>]+:)?[^<>]+)>')
 
-DEFAULT_RESPONSE = {'description': 'Success'}
-
-
-def not_none(data):
-    '''Remove all keys where value is None'''
-    return dict((k, v) for k, v in data.items() if v is not None)
+DEFAULT_RESPONSE_DESCRIPTION = 'Success'
+DEFAULT_RESPONSE = {'description': DEFAULT_RESPONSE_DESCRIPTION}
 
 
 def ref(model):
     '''Return a reference to model in definitions'''
-    return {'$ref': '#/definitions/{0}'.format(model)}
+    name = model.name if isinstance(model, ApiModel) else model
+    return {'$ref': '#/definitions/{0}'.format(name)}
 
 
 def extract_path(path):
@@ -84,7 +72,7 @@ def extract_path_params(path):
     '''
     Extract Flask-style parameters from an URL pattern as Swagger ones.
     '''
-    params = {}
+    params = OrderedDict()
     for match in RE_PARAMS.findall(path):
         descriptor, name = match.split(':') if ':' in match else (None, match)
         param = {
@@ -103,61 +91,9 @@ def extract_path_params(path):
     return params
 
 
-def field_to_property(field):
-    '''Convert a restful.Field into a Swagger property declaration'''
-    prop = {'type': 'string'}
-
-    if isinstance(field, fields.List):
-        nested_field = field.container
-        prop = {'type': 'array', 'items': field_to_property(nested_field)}
-
-    elif isinstance(field, fields.Nested):
-        nested_field = field.nested
-        prop = ref(nested_field.__apidoc__['name'])
-        if getattr(field, '__apidoc__', {}).get('as_list'):
-            prop = {'type': 'array', 'items': prop}
-        elif not field.allow_null:
-            prop['required'] = True
-
-    elif field in FIELDS:
-        prop = FIELDS[field].copy()
-
-    elif field.__class__ in FIELDS:
-        prop = FIELDS[field.__class__].copy()
-
-    elif hasattr(field, '__apidoc__'):
-        if 'type' in field.__apidoc__:
-            prop = {'type': field.__apidoc__['type']}
-            if 'format' in field.__apidoc__:
-                prop['format'] = field.__apidoc__['format']
-        elif 'fields' in field.__apidoc__:
-            prop = ref(field.__apidoc__.get('name', field.__class__.__name__))
-
-    else:
-        for cls in FIELDS:
-            if isinstance(field, cls) or (isclass(field) and issubclass(field, cls)):
-                prop = FIELDS[cls].copy()
-                break
-
-    if getattr(field, 'description', None):
-        prop['description'] = field.description
-    if getattr(field, 'minimum', None) is not None:
-        prop['minimum'] = field.minimum
-    if getattr(field, 'maximum', None):
-        prop['maximum'] = field.maximum
-    if getattr(field, 'enum', None):
-        prop['enum'] = field.enum
-    if getattr(field, 'required', None):
-        prop['required'] = field.required
-    if getattr(field, 'default', None):
-        prop['default'] = field.default
-
-    return prop
-
-
 def parser_to_params(parser):
     '''Extract Swagger parameters from a RequestParser'''
-    params = {}
+    params = OrderedDict()
     locations = set()
     for arg in parser.args:
         if arg.location == 'cookie':
@@ -171,9 +107,12 @@ def parser_to_params(parser):
         if arg.default:
             param['default'] = arg.default
         if arg.action == 'append':
-            param['allowMultiple'] = True
+            param['items'] = {'type': param['type']}
+            param['type'] = 'array'
+            param['collectionFormat'] = 'multi'
         if arg.choices:
             param['enum'] = arg.choices
+            param['collectionFormat'] = 'multi'
         # if param['in'] == 'body':
         #     params['body'] = param
         # else:
@@ -225,29 +164,51 @@ class Swagger(object):
                 infos['license']['url'] = self.api.license_url
 
         paths = {}
-        tags = []
+        tags = self.extract_tags(self.api)
+
         for ns in self.api.namespaces:
-            tags.append({
-                'name': ns.name,
-                'description': ns.description
-            })
-            for resource, urls, kwargs in ns.resources:
+            for resource, urls, kwargs in ns.resources.values():
                 for url in urls:
                     paths[extract_path(url)] = self.serialize_resource(ns, resource, url)
 
         specs = {
             'swagger': '2.0',
             'basePath': basepath,
-            'paths': not_none(paths),
+            'paths': not_none_sorted(paths),
             'info': infos,
-            'produces': list(self.api.representations.keys()),
+            'produces': list(iterkeys(self.api.representations)),
             'consumes': ['application/json'],
             'securityDefinitions': self.api.authorizations or None,
             'security': self.security_requirements(self.api.security) or None,
             'tags': tags,
             'definitions': self.serialize_definitions() or None,
+            'host': current_app.config.get('SERVER_NAME', None) or None,
         }
         return not_none(specs)
+
+    def extract_tags(self, api):
+        tags = []
+        by_name = {}
+        for tag in api.tags:
+            if isinstance(tag, string_types):
+                tag = {'name': tag}
+            elif isinstance(tag, (list, tuple)):
+                tag = {'name': tag[0], 'description': tag[1]}
+            elif isinstance(tag, dict) and 'name' in tag:
+                pass
+            else:
+                raise ValueError('Unsupported tag format for {0}'.format(tag))
+            tags.append(tag)
+            by_name[tag['name']] = tag
+        for ns in api.namespaces:
+            if ns.name not in by_name:
+                tags.append({
+                    'name': ns.name,
+                    'description': ns.description
+                })
+            elif ns.description:
+                by_name[ns.name]['description'] = ns.description
+        return tags
 
     def extract_resource_doc(self, resource, url):
         doc = getattr(resource, '__apidoc__', {})
@@ -256,16 +217,16 @@ class Swagger(object):
         doc['name'] = resource.__name__
         doc['params'] = self.merge_params(extract_path_params(url), doc)
         for method in [m.lower() for m in resource.methods or []]:
-            method_doc = doc.get(method, {})
+            method_doc = doc.get(method, OrderedDict())
             method_impl = getattr(resource, method)
             if hasattr(method_impl, 'im_func'):
                 method_impl = method_impl.im_func
             elif hasattr(method_impl, '__func__'):
                 method_impl = method_impl.__func__
-            method_doc = merge(method_doc, getattr(method_impl, '__apidoc__', {}))
+            method_doc = merge(method_doc, getattr(method_impl, '__apidoc__', OrderedDict()))
             if method_doc is not False:
                 method_doc['docstring'] = getattr(method_impl, '__doc__')
-                method_doc['params'] = self.merge_params({}, method_doc)
+                method_doc['params'] = self.merge_params(OrderedDict(), method_doc)
             doc[method] = method_doc
         return doc
 
@@ -280,7 +241,10 @@ class Swagger(object):
             params = merge(params, doc['params'])
 
         if 'body' in doc:
-            model, description = doc['body'] if isinstance(doc['body'], (list, tuple)) else (doc['body'], None)
+            if isinstance(doc['body'], (list, tuple)) and len(doc['body']) == 2:
+                model, description = doc['body']
+            else:
+                model, description = doc['body'], None
             params = merge(params, {
                 'payload': not_none({
                     'name': 'payload',
@@ -314,6 +278,9 @@ class Swagger(object):
             'parameters': self.parameters_for(doc, method) or None,
             'security': self.security_for(doc, method),
         }
+        # Handle deprecated annotation
+        if doc.get('deprecated') or doc[method].get('deprecated'):
+            operation['deprecated'] = True
         # Handle form exceptions:
         if operation['parameters'] and any(p['in'] == 'formData' for p in operation['parameters']):
             if any(p['type'] == 'file' for p in operation['parameters']):
@@ -349,22 +316,47 @@ class Swagger(object):
 
     def parameters_for(self, doc, method):
         params = []
-        for name, param in merge(doc['params'], doc[method]['params']).items():
+        for name, param in iteritems(merge(doc['params'], doc[method]['params'])):
             param['name'] = name
-            if 'type' not in param:
+            if 'type' not in param and 'schema' not in param:
                 param['type'] = 'string'
             if 'in' not in param:
                 param['in'] = 'query'
+
+            if 'type' in param and 'schema' not in param:
+                ptype = param.get('type', None)
+                if isinstance(ptype, (list, tuple)):
+                    typ = ptype[0]
+                    param['type'] = 'array'
+                    param['items'] = {'type': PY_TYPES.get(typ, typ)}
+
+                elif isinstance(ptype, (type, type(None))) and ptype in PY_TYPES:
+                    param['type'] = PY_TYPES[ptype]
+
             params.append(param)
+
+        # Handle fields mask
+        if (doc.get('__mask__') or doc[method].get('__mask__')
+                and current_app.config['RESTPLUS_MASK_SWAGGER']):
+            params.append({
+                'name': current_app.config['RESTPLUS_MASK_HEADER'],
+                'in': 'header',
+                'type': 'string',
+                'format': 'mask',
+                'description': 'An optionnal fields mask',
+            })
+
         return params
 
     def responses_for(self, doc, method):
+        # TODO: simplify/refactor responses/model handling
         responses = {}
 
         for d in doc, doc[method]:
             if 'responses' in d:
-                for code, response in d['responses'].items():
+                for code, response in iteritems(d['responses']):
                     description, model = (response, None) if isinstance(response, string_types) else response
+                    description = description or DEFAULT_RESPONSE_DESCRIPTION
                     if code in responses:
                         responses[code].update(description=description)
                     else:
@@ -381,59 +373,33 @@ class Swagger(object):
             responses['200'] = DEFAULT_RESPONSE.copy()
         return responses
 
-    def serialize_model(self, name, fields):
-        properties = {}
-        required = []
-        for name, field in fields.items():
-            prop = field_to_property(field)
-            if prop.get('required'):
-                required.append(name)
-            if 'required' in prop:
-                del prop['required']
-            properties[name] = prop
-
-        return not_none({
-            'required': required or None,
-            'properties': properties,
-        })
-
     def serialize_definitions(self):
         return dict(
-            (name, self.serialize_model(name, model))
-            for name, model in self._registered_models.items()
+            (name, model.__schema__)
+            for name, model in iteritems(self._registered_models)
         )
-
-    def serialize_field(self, field):
-        return field_to_property(field)
 
     def serialize_schema(self, model):
         if isinstance(model, (list, tuple)):
-            schema = {'type': 'array'}
             model = model[0]
+            return {
+                'type': 'array',
+                'items': self.serialize_schema(model),
+            }
 
-            if isinstance(model, dict) and hasattr(model, '__apidoc__'):
-                model = model.__apidoc__['name']
-                self.register_model(model)
-                schema['items'] = ref(model)
-                return schema
-
-            elif isinstance(model, six.string_types):
-                self.register_model(model)
-                schema['items'] = ref(model)
-                return schema
-
-            elif model in PY_TYPES:
-                schema['items'] = {'type': PY_TYPES[model]}
-                return schema
-
-        elif isinstance(model, dict) and hasattr(model, '__apidoc__'):
-            model = model.__apidoc__['name']
+        elif isinstance(model, ApiModel):
             self.register_model(model)
             return ref(model)
 
-        elif isinstance(model, six.string_types):
+        elif isinstance(model, string_types):
             self.register_model(model)
             return ref(model)
+
+        elif isclass(model) and issubclass(model, fields.BaseField):
+            return self.serialize_schema(model())
+
+        elif isinstance(model, fields.BaseField):
+            return model.__schema__
 
         elif isinstance(model, (type, type(None))) and model in PY_TYPES:
             return {'type': PY_TYPES[model]}
@@ -441,20 +407,25 @@ class Swagger(object):
         raise ValueError('Model {0} not registered'.format(model))
 
     def register_model(self, model):
-        if model not in self.api.models:
-            raise ValueError('Model {0} not registered'.format(model))
-        specs = self.api.models[model]
-        self._registered_models[model] = specs
-        if isinstance(specs, dict):
-            for name, field in specs.items():
-                if isinstance(field, fields.Nested) and hasattr(field.nested, '__apidoc__'):
-                    self.register_model(field.nested.__apidoc__['name'])
-                elif isinstance(field, fields.List) and hasattr(field.container, '__apidoc__'):
-                    self.register_model(field.container.__apidoc__['name'])
-                elif (isinstance(field, fields.Raw)
-                        or (isclass(field) and issubclass(field, fields.Raw))
-                        ) and hasattr(field, '__apidoc__') and not field.__apidoc__.get('type'):
-                    self.register_model(field.__apidoc__['name'])
+        name = model.name if isinstance(model, ApiModel) else model
+        if name not in self.api.models:
+            raise ValueError('Model {0} not registered'.format(name))
+        specs = self.api.models[name]
+        self._registered_models[name] = specs
+        if isinstance(specs, ApiModel):
+            if specs.__parent__:
+                self.register_model(specs.__parent__)
+            for field in itervalues(specs):
+                self.register_field(field)
+
+    def register_field(self, field):
+        if isinstance(field, fields.Polymorph):
+            for model in itervalues(field.mapping):
+                self.register_model(model)
+        elif isinstance(field, fields.Nested):
+            self.register_model(field.nested)
+        elif isinstance(field, fields.List):
+            self.register_field(field.container)
 
     def security_for(self, doc, method):
         security = None
@@ -478,12 +449,12 @@ class Swagger(object):
             return []
 
     def security_requirement(self, value):
-        if isinstance(value, (six.string_types)):
+        if isinstance(value, (string_types)):
             return {value: []}
         elif isinstance(value, dict):
             return dict(
                 (k, v if isinstance(v, (list, tuple)) else [v])
-                for k, v in value.items()
+                for k, v in iteritems(value)
             )
         else:
             return None
